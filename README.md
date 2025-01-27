@@ -16,6 +16,19 @@ You must have python-bindings enabled.
 
 This is currently in beta state, testing feedback will be appreciated!
 
+Predecessor Project
+-------------------
+
+This project is based on the work of Sandeep Mukherjee for gnucash-fiximports
+
+https://github.com/sandeepmukherjee/gnucash-fiximports/tree/master
+
+and was necessary after the deprecation of gnucash to continue the option
+of the valuable rule based bulk modification of transactions. The original 
+software can partly still be found in some of the new classes and functions.
+For transparency reasons this project starts with the last version in the 
+predecessor project.
+
 Getting started
 ---------------
 
