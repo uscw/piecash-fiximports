@@ -1,5 +1,8 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
+# Bespiel-Aufruf: python ../fiximports.py Imbalance-EUR rules.txt simple-checkbook.gnucash -n
+# Bespiel-Aufruf: ~/PowerFolders/AI/compiler/python/xmpls/gnucash/gnucash-fiximports/fiximports.py -i Ausgleichskonto-EUR Ausgleichskonto-EUR rules.txt ../transaktionen/finanzen-2005.gnucash
+#
 # fiximports.py -- Categorize imported transactions according to user-defined
 #                  rules.
 #
@@ -40,6 +43,7 @@ VERSION = "0.3Beta"
 # python imports
 import argparse
 import logging
+import datetime
 from datetime import date
 import re
 import sys,traceback
@@ -73,34 +77,47 @@ def readrules(filename):
         for line in fd:
             line = line.strip()
             if line and not line.startswith('#'):
+                compiled = {}
                 if line.startswith('"'):
                     logging.debug('Using "-escpaped account in rule')
                     result = re.match(r"^\"([^\"]+)\"\s+(.+)", line)
-                    if result:
-                        ac = result.group(1)
-                        pattern = result.group(2)
-                        compiled = re.compile(pattern)  # Makesure RE is OK
-                        rules.append((compiled, ac))
-                        logging.debug('Found account %s and rule %s' % ( ac, pattern ) )
-                    else:
-                        logging.warn('Ignoring line: (incorrect format): "%s"', line)
                 else:                       	       
                     result = re.match(r"^(\S+)\s+(.+)", line)
-                    if result:
-                        ac = result.group(1)
-                        pattern = result.group(2)
-                        compiled = re.compile(pattern)  # Makesure RE is OK
-                        rules.append((compiled, ac))
-                    else:
-                        logging.warn('Ignoring line: (incorrect format): "%s"', line)
+                if result:
+                    ac = result.group(1)
+                    pattern = result.group(2)
+                    for subpattern in pattern.split("&&"):
+                        subpattern = subpattern.strip(" ")
+                        if subpattern[0:2] == "!!":
+                            compiled[re.compile(subpattern[2:len(subpattern)].strip(" "), re.IGNORECASE)] = False
+                        else:
+                            compiled[re.compile(subpattern, re.IGNORECASE)] = True
+                    rules.append((compiled, ac))
+                    logging.debug('Found account %s and rule %s' % ( ac, pattern ) )
+                else:
+                    logging.warn('Ignoring line: (incorrect format): "%s"', line)
     return rules
 
 
 def get_ac_from_str(str, rules, root_ac):
-    for pattern, acpath in rules:
-        if pattern.search(str):
+    for patternlist, acpath in rules:
+#    for item in rules:
+#        print (item, rules[item])
+#        print (acpath)
+        patternstr = ""
+        matchCount = 0
+        for pattern in patternlist:
+            # patternstr += str(pattern) + " "
+            if pattern.search(str) and patternlist[pattern] == True: # pattern found and should be found
+                logging.debug('"%s" matches pattern "%s"', str, pattern.pattern)
+                matchCount += 1
+            elif not pattern.search(str) and patternlist[pattern] == False: # pattern not found and should not be found
+                logging.debug('"%s" matches NOT to find pattern "%s"', str, pattern.pattern)
+                matchCount += 1
+            else:
+                logging.debug('"%s" does not match pattern "%s"', str, pattern.pattern)
+        if matchCount == len(patternlist):
             acplist = re.split(':', acpath)
-            logging.debug('"%s" matches pattern "%s"', str, pattern.pattern)
             newac = account_from_path(root_ac, acplist)
             return newac
     return ""
@@ -111,7 +128,7 @@ def get_ac_from_str(str, rules, root_ac):
 
 def parse_cmdline():
     parser = argparse.ArgumentParser()
-    parser.add_argument('-i', '--imbalance-ac', default="Imbalance-[A-Z]{3}",
+    parser.add_argument('-i', '--imbalance_ac', default="Imbalance-[A-Z]{3}",
                         help="Imbalance account name pattern. Default=Imbalance-[A-Z]{3}")
     parser.add_argument('--version', action='store_true',
                         help="Display version and exit.")
@@ -145,7 +162,7 @@ def parse_cmdline():
 def main():
     args = parse_cmdline()
     if args.version:
-        print(VERSION)
+        print (VERSION)
         exit(0)
 
     if args.verbose:
@@ -159,7 +176,11 @@ def main():
     rules = readrules(args.rulesfile)
     account_path = re.split(':', args.ac2fix)
 
-    gnucash_session = Session(args.gnucash_file, is_new=False)
+    try: 
+        gnucash_session = Session(args.gnucash_file, is_new=False)
+    except:
+        print ("ERROR: Session locked? ", sys.exc_info()[1])
+        exit(1)
     total = 0
     imbalance = 0
     fixed = 0
@@ -169,11 +190,11 @@ def main():
 
         imbalance_pattern = re.compile(args.imbalance_ac)
 
-        for split in orig_account.GetSplitList():
+        for ac_ori in orig_account.GetSplitList():
             total += 1
-            trans = split.parent
+            trans = ac_ori.parent
             splits = trans.GetSplitList()
-            trans_date = trans.GetDate().date()
+            trans_date = datetime.date(trans.GetDate().year, trans.GetDate().month, trans.GetDate().day)
             trans_desc = trans.GetDescription()
             trans_memo = trans.GetNotes()
             for split in splits:
@@ -183,11 +204,11 @@ def main():
                 if imbalance_pattern.match(acname):
                     imbalance += 1
                     search_str = trans_desc
-                    if args.use_memo:
+                    if args.use_memo and trans_memo != None:
                         search_str = trans_memo
                     newac = get_ac_from_str(search_str, rules, root_account)
                     if newac != "":
-                        logging.debug('\tChanging account to: %s', newac.GetName())
+                        logging.info('\tChanging account from: %s to %s for %s', acname, newac.GetName(), search_str)
                         split.SetAccount(newac)
                         fixed += 1
 
@@ -198,10 +219,8 @@ def main():
 
     except Exception as ex:
         logging.error(ex) 
-
+    
     gnucash_session.end()
-
-
 
 if __name__ == "__main__":
     main()
