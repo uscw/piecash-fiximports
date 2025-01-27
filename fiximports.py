@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 
-# Bespiel-Aufruf: python ../fiximports.py Imbalance-EUR rules.txt simple-checkbook.gnucash -n
-# Bespiel-Aufruf: ~/PowerFolders/AI/compiler/python/xmpls/gnucash/gnucash-fiximports/fiximports.py -i Ausgleichskonto-EUR Ausgleichskonto-EUR rules.txt ../transaktionen/finanzen-2005.gnucash
 #
 # fiximports.py -- Categorize imported transactions according to user-defined
 #                  rules.
@@ -51,21 +49,6 @@ import sys,traceback
 # gnucash imports
 from gnucash import Session
 
-
-def account_from_path(top_account, account_path, original_path=None):
-    if original_path is None:
-        original_path = account_path
-    account, account_path = account_path[0], account_path[1:]
-    account = top_account.lookup_by_name(account)
-    if account is None or account.get_instance() is None:
-        raise Exception(
-            "A/C path " + ''.join(original_path) + " could not be found")
-    if len(account_path) > 0:
-        return account_from_path(account, account_path, original_path)
-    else:
-        return account
-
-
 def readrules(filename):
     '''Read the rules file.
     Populate an list with results. The list contents are:
@@ -98,6 +81,18 @@ def readrules(filename):
                     logging.warn('Ignoring line: (incorrect format): "%s"', line)
     return rules
 
+def account_from_path(top_account, account_path, original_path=None):
+    if original_path is None:
+        original_path = account_path
+    account, account_path = account_path[0], account_path[1:]
+    account = top_account.lookup_by_name(account)
+    if account is None or account.get_instance() is None:
+        raise Exception(
+            "A/C path " + ''.join(original_path) + " could not be found")
+    if len(account_path) > 0:
+        return account_from_path(account, account_path, original_path)
+    else:
+        return account
 
 def get_ac_from_str(str, rules, root_ac):
     for patternlist, acpath in rules:
