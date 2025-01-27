@@ -32,9 +32,9 @@ predecessor project.
 Getting started
 ---------------
 
-On Ubuntu you can simply install the Python bindings by:
+You can simply install the Python bindings by:
 
-    pip install piecash
+    pip3 install piecash
 
 Running the script on the example GnuCash file:
 
