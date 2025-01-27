@@ -3,11 +3,13 @@
 #
 # fiximports.py -- Categorize imported transactions according to user-defined
 #                  rules.
-#
+# 
+# Copyright (C) 2025 Ulrich Schwardmann <UlrichSchwardmann [at] web.de>
 # Copyright (C) 2013 Sandeep Mukherjee <mukherjee.sandeep@gmail.com>
+#
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License as
-# published by the Free Software Foundation; either version 2 of
+# published by the Free Software Foundation; either version 3 of
 # the License, or (at your option) any later version.
 #
 # This program is distributed in the hope that it will be useful,
@@ -24,6 +26,7 @@
 
 # @file
 #   @brief Categorize imported transactions according to user-defined rules.
+#   @author Ulrich Schwardmann <UlrichSchwardmann [at] web.de>
 #   @author Sandeep Mukherjee <mukherjee.sandeep@gmail.com>
 #
 # When GnuCash imports a OFX/QFX file, it adds all transactions to an
@@ -35,87 +38,166 @@
 # To do this, you need to create a "rules" file first. See rules.txt for
 # more information on the format.
 # This script can search in the description or the memo fields.
-
-VERSION = "0.3Beta"
+#
+# - Rules can be defined as a list of partial rules separated by '&&'. 
+# - In this case the conditions of all partial rules have to be fulfilled.
+# - Partial rules furthermore can be inverted by a leading '!!'.
+# - If a partial rule only uses upper case characters, the rule ignores cases.
+# - Imbalance account name pattern can be given as additional requirement for
+#   the account name to be fixed.
+# - Offset account allows a modification of the fix account only, if this 
+#   offset account is involved in the transaction.
+ 
+VERSION = "0.4Beta"
 
 # python imports
 import argparse
 import logging
-import datetime
+from datetime import datetime
 from datetime import date
 import re
 import sys,traceback
+import os
 
-# gnucash imports
-from gnucash import Session
+# piecash imports
+from piecash import open_book, ledger, Split
 
-def readrules(filename):
-    '''Read the rules file.
-    Populate an list with results. The list contents are:
-    ([pattern], [account name]), ([pattern], [account name]) ...
-    Note, this is in reverse order from the file.
-    '''
-    rules = []
-    with open(filename, 'r') as fd:
-        for line in fd:
-            line = line.strip()
-            if line and not line.startswith('#'):
-                compiled = {}
-                if line.startswith('"'):
-                    logging.debug('Using "-escpaped account in rule')
-                    result = re.match(r"^\"([^\"]+)\"\s+(.+)", line)
-                else:                       	       
-                    result = re.match(r"^(\S+)\s+(.+)", line)
-                if result:
-                    ac = result.group(1)
-                    pattern = result.group(2)
-                    for subpattern in pattern.split("&&"):
-                        subpattern = subpattern.strip(" ")
-                        if subpattern[0:2] == "!!":
-                            compiled[re.compile(subpattern[2:len(subpattern)].strip(" "), re.IGNORECASE)] = False
-                        else:
-                            compiled[re.compile(subpattern, re.IGNORECASE)] = True
-                    rules.append((compiled, ac))
-                    logging.debug('Found account %s and rule %s' % ( ac, pattern ) )
+now_iso = datetime.now().isoformat()
+
+class Rules():
+    def __init__(self,filename):
+        self.rules = self.readrules(filename)
+        
+    def readrules(self,filename):
+        '''Read the rules file.
+        Populate a list with results. The list contents are:
+        ([pattern], [account name]), ([pattern], [account name]) ...
+        Note: rules list is in the order from the file.
+        '''
+        rules = []
+        with open(filename, 'r') as fd:
+            for line in fd:
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    compiled = {}
+                    if line.startswith('"'):
+                        logging.debug('Using "-escpaped account in rule')
+                        result = re.match(r"^\"([^\"]+)\"\s+(.+)", line)
+                    else:                       	       
+                        result = re.match(r"^(\S+)\s+(.+)", line)
+                    if result:
+                        ac = result.group(1)
+                        pattern = result.group(2)
+                        for subpattern in pattern.split("&&"):
+                            if subpattern[0:2] == "!!":
+                                subpattern = subpattern[2:].strip()
+                                if subpattern.upper() == subpattern:
+                                    compiled[re.compile(subpattern, re.IGNORECASE)] = False
+                                else:
+                                    compiled[re.compile(subpattern)] = False
+                            else:
+                                subpattern = subpattern.strip()
+                                if subpattern.upper() == subpattern:
+                                    compiled[re.compile(subpattern, re.IGNORECASE)] = True
+                                else:
+                                    compiled[re.compile(subpattern)] = True
+                        rules.append((compiled, ac))
+                        logging.debug('Found rule %s for account %s' % ( pattern, ac ) )
+                    else:
+                        logging.warn('Ignoring line: (incorrect format): "%s"', line)
+        rules.reverse()
+        return rules
+
+### end class Rules() ***
+    
+class Accounts():
+    def __init__(self, book, args):
+        self.args = args
+        self.book = book
+        self.root_account = book.root_account
+        return
+
+    def account_from_path(self, account_path, account=None, original_path=None):
+        if original_path is None:
+            original_path = account_path
+        if account is None:
+            account = self.root_account
+        account_name, account_path = account_path[0], account_path[1:]
+        account = self.get_account_from_Children(account, account_name)
+        if account is None:
+            raise Exception(
+                "A/C path " + ''.join(original_path) + " could not be found")
+        else:
+            None # logging.debug(' Account found for %s',  account.fullname )
+        if len(account_path) > 0:
+            return self.account_from_path(account_path, account, original_path)
+        else:
+            self.account = account
+            return account
+        
+    def get_ac_from_str(self, search_str, rules):
+        for patternlist, acpath in rules:
+            patternstr = ""
+            matchCount = 0
+            for pattern in patternlist:
+                # patternstr += str(pattern) + " "
+                if pattern.search(search_str):
+                    if patternlist[pattern] == True: # pattern found and should be found
+                        logging.debug('"%s" matches pattern "%s"', search_str, pattern.pattern)
+                        matchCount += 1
                 else:
-                    logging.warn('Ignoring line: (incorrect format): "%s"', line)
-    return rules
+                    if patternlist[pattern] == False: # pattern not found and should not be found
+                        logging.debug('"%s" matches NOT pattern to find !! "%s"', search_str, pattern.pattern)
+                        matchCount += 1
+                    else:
+                        None # logging.debug('"%s" does not match pattern "%s"', search_str, pattern.pattern)
+            if matchCount == len(patternlist):
+                acplist = re.split(':', acpath)
+                newac = self.account_from_path(acplist)
+                return newac, search_str
+        return "", ""
 
-def account_from_path(top_account, account_path, original_path=None):
-    if original_path is None:
-        original_path = account_path
-    account, account_path = account_path[0], account_path[1:]
-    account = top_account.lookup_by_name(account)
-    if account is None or account.get_instance() is None:
-        raise Exception(
-            "A/C path " + ''.join(original_path) + " could not be found")
-    if len(account_path) > 0:
-        return account_from_path(account, account_path, original_path)
-    else:
-        return account
+    def get_account_from_Children(self,top_acc,acc_name):
+        for acc in top_acc.children:
+            if acc.name == acc_name:
+                return acc
+        return None
 
-def get_ac_from_str(str, rules, root_ac):
-    for patternlist, acpath in rules:
-#    for item in rules:
-#        print (item, rules[item])
-#        print (acpath)
-        patternstr = ""
-        matchCount = 0
-        for pattern in patternlist:
-            # patternstr += str(pattern) + " "
-            if pattern.search(str) and patternlist[pattern] == True: # pattern found and should be found
-                logging.debug('"%s" matches pattern "%s"', str, pattern.pattern)
-                matchCount += 1
-            elif not pattern.search(str) and patternlist[pattern] == False: # pattern not found and should not be found
-                logging.debug('"%s" matches NOT to find pattern "%s"', str, pattern.pattern)
-                matchCount += 1
-            else:
-                logging.debug('"%s" does not match pattern "%s"', str, pattern.pattern)
-        if matchCount == len(patternlist):
-            acplist = re.split(':', acpath)
-            newac = account_from_path(root_ac, acplist)
-            return newac
-    return ""
+    def fix_accs_from_rules(self,fix_acc,rules):
+        self.total = 0
+        self.options = 0
+        self.fixed = 0
+        offset_account_pattern = re.compile(self.args.offset_ac)
+        fix_acc_splits_copy = fix_acc.splits.copy() # fix_acc.splits is changed by account operation  
+        for split in fix_acc_splits_copy:
+            self.total += 1
+            logging.debug("  rule check for transaction from '{}' to '{}' of '{}' with value '{}'".format(split.transaction.splits[0].account.fullname, split.transaction.splits[1].account.fullname, split.transaction.description, split.transaction.splits[0].value))
+            search_str = split.transaction.description
+            if self.args.use_memo:
+                search_str = split.memo
+            target_acc, search_str = self.get_ac_from_str(search_str, rules)
+            if target_acc != "":
+                logging.info("\tChanging account from: '%s' to '%s' for transaction '%s' at %s", fix_acc.fullname, target_acc.fullname, search_str, split.transaction.post_date)
+                if split.transaction.splits[0].account == fix_acc:
+                    self.options += 1
+                    if offset_account_pattern.match(split.transaction.splits[1].account.name):
+                        split.transaction.splits[0].account = target_acc
+                        self.fixed += 1
+                elif split.transaction.splits[1].account == fix_acc:
+                    self.options += 1
+                    if offset_account_pattern.match(split.transaction.splits[0].account.name):
+                        split.transaction.splits[1].account = target_acc
+                        self.fixed += 1
+
+    def is_imbalance_account(self):
+        imbalance_pattern = re.compile(self.args.imbalance_ac)
+        return imbalance_pattern.match(acname)
+
+### end class Accounts() ***
+
+def make_backup(gnucash_file):
+    bck_file = gnucash_file + "." + datetime.now().isoformat().replace("-","").replace(":","").replace(".","").replace("T","")[:] + "fix_bck.gnucash"
+    os.system('cp ' + gnucash_file + " " + bck_file)
 
 # Parses command-line arguments.
 # Returns an array with all user-supplied values.
@@ -123,9 +205,11 @@ def get_ac_from_str(str, rules, root_ac):
 
 def parse_cmdline():
     parser = argparse.ArgumentParser()
-    parser.add_argument('-i', '--imbalance_ac', default="Imbalance-[A-Z]{3}",
+    parser.add_argument('-i', '--imbalance_ac',default="(.)*", # xmpl: default="Imbalance-[A-Z]{3}",
                         help="Imbalance account name pattern. Default=Imbalance-[A-Z]{3}")
-    parser.add_argument('--version', action='store_true',
+    parser.add_argument('-o', '--offset_ac', default="(.)*",
+                        help="Modify account only, if this offset account is involved")
+    parser.add_argument('-V','--version', action='store_true',
                         help="Display version and exit.")
     parser.add_argument('-m', '--use_memo', action='store_true',
                         help="Use memo field instead of description field to match rules.")
@@ -133,29 +217,14 @@ def parse_cmdline():
                         help="Verbose (debug) logging.")
     parser.add_argument('-q', '--quiet', action='store_true',
                         help="Suppress normal output (except errors).")
-    parser.add_argument('-n', '--nochange', action='store_true',
-                        help="Do not modify gnucash file. No effect if using SQL.")
+    parser.add_argument('-c', '--change', action='store_true',
+                        help="Change gnucash file only with this option.")
     parser.add_argument(
         "ac2fix", help="Full path of account to fix, e.g. Liabilities:CreditCard")
     parser.add_argument("rulesfile", help="Rules file. See doc for format.")
     parser.add_argument("gnucash_file", help="GnuCash file to modify.")
     args = parser.parse_args()
 
-    return args
-
-# Main entry point.
-# 1. Parse command line.
-# 2. Read rules.
-# 3. Create session.
-# 4. Get a list of all splits in the account to be fixed. For every split:
-#     4.1: Lookup up description or memo fied.
-#     4.2: Use the rules to check if a matching account can be located.
-#     4.3: If there is a matching account, set the account in the split.
-# 5. Print stats and save the session (if needed).
-
-
-def main():
-    args = parse_cmdline()
     if args.version:
         print (VERSION)
         exit(0)
@@ -167,55 +236,40 @@ def main():
     else:
         loglevel = logging.INFO
     logging.basicConfig(level=loglevel)
+    return args
 
-    rules = readrules(args.rulesfile)
-    account_path = re.split(':', args.ac2fix)
+def main(args):
 
-    try: 
-        gnucash_session = Session(args.gnucash_file, is_new=False)
-    except:
-        print ("ERROR: Session locked? ", sys.exc_info()[1])
-        exit(1)
-    total = 0
-    imbalance = 0
-    fixed = 0
     try:
-        root_account = gnucash_session.book.get_root_account()
-        orig_account = account_from_path(root_account, account_path)
+        book = open_book(args.gnucash_file, readonly=False)
+    except:
+        logging.error("ERROR: Session locked? " + str(sys.exc_info()[1]))
+        exit(1)
 
-        imbalance_pattern = re.compile(args.imbalance_ac)
+    account_path = re.split(':', args.ac2fix)
+    RLS = Rules(args.rulesfile)
 
-        for ac_ori in orig_account.GetSplitList():
-            total += 1
-            trans = ac_ori.parent
-            splits = trans.GetSplitList()
-            trans_date = datetime.date(trans.GetDate().year, trans.GetDate().month, trans.GetDate().day)
-            trans_desc = trans.GetDescription()
-            trans_memo = trans.GetNotes()
-            for split in splits:
-                ac = split.GetAccount()
-                acname = ac.GetName()
-                logging.debug('%s: %s => %s', trans_date, trans_desc, acname)
-                if imbalance_pattern.match(acname):
-                    imbalance += 1
-                    search_str = trans_desc
-                    if args.use_memo and trans_memo != None:
-                        search_str = trans_memo
-                    newac = get_ac_from_str(search_str, rules, root_account)
-                    if newac != "":
-                        logging.info('\tChanging account from: %s to %s for %s', acname, newac.GetName(), search_str)
-                        split.SetAccount(newac)
-                        fixed += 1
+    book_acc = Accounts(book, args)
+    account_path = args.ac2fix.split(":")
+    fix_acc = book_acc.account_from_path(account_path)
+    imbalance_pattern = re.compile(args.imbalance_ac)
+    if not imbalance_pattern.match(fix_acc.name):
+        logging.error("\tAccount to fix: '%s' does not match the imbalance_pattern: '%s'! Try adapting --imbalance_ac parameter accordingly.", fix_acc.name, args.imbalance_ac)
+        sys.exit(1)
+    logging.info("Account to fix: '%s'. Number of transactions: %s",fix_acc.fullname,str(len(fix_acc.splits)))
+    book_acc.fix_accs_from_rules(fix_acc, RLS.rules)
+    logging.info(" Total: %s, FixOpts: %s, Fixed: %s", book_acc.total, book_acc.options, book_acc.fixed )
 
-        if not args.nochange:
-            gnucash_session.save()
+    book_acc.book.flush()     # register the changes (but not save)
+    if args.change:
+        make_backup(args.gnucash_file)
+        book_acc.book.save()  # save the book
+    else:
+        logging.info(" Fix Changes ignored. Use option -c to save changes to gnucash file")
 
-        logging.info('Total splits=%s, imbalance=%s, fixed=%s', total, imbalance, fixed)
-
-    except Exception as ex:
-        logging.error(ex) 
-    
-    gnucash_session.end()
-
+        
+#####################    
 if __name__ == "__main__":
-    main()
+    args = parse_cmdline()
+    main(args)
+    
