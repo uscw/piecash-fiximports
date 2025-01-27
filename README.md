@@ -34,7 +34,7 @@ Getting started
 
 On Ubuntu you can simply install the Python bindings by:
 
-    sudo apt-get install python-gnucash
+    pip install piecash
 
 Running the script on the example GnuCash file:
 
